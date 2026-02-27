@@ -2,8 +2,6 @@
 #include <mutex>
 #include <filesystem>
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp/executors/multi_threaded_executor.hpp>
-
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <message_filters/subscriber.h>
@@ -29,7 +27,6 @@ struct NodeConfig
     std::string map_frame = "map";
     std::string local_frame = "lidar";
     double update_hz = 1.0;
-    double pub_hz = 10.0;
 };
 
 struct NodeState
@@ -74,16 +71,11 @@ public:
 
         m_map_cloud_pub = this->create_publisher<sensor_msgs::msg::PointCloud2>("map_cloud", 10);
 
-        // m_timer = this->create_wall_timer(200ms, std::bind(&LocalizerNode::timerCB, this));
-        std::chrono::milliseconds dt = std::chrono::milliseconds(static_cast<int>(1000.0 / m_config.pub_hz));
-        cb_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-        m_timer = this->create_wall_timer(dt, std::bind(&LocalizerNode::tfPubTimerCB, this), cb_group);
-        
-        // tf_pub_timer = this->create_wall_timer(20ms, std::bind(&LocalizerNode::tfPubTimerCB, this));
+        m_timer = this->create_wall_timer(10ms, std::bind(&LocalizerNode::timerCB, this));
     }
 
     void loadParameters()
-    {   
+    {
         this->declare_parameter("config_path", "");
         std::string config_path;
         this->get_parameter<std::string>("config_path", config_path);
@@ -100,7 +92,6 @@ public:
         m_config.map_frame = config["map_frame"].as<std::string>();
         m_config.local_frame = config["local_frame"].as<std::string>();
         m_config.update_hz = config["update_hz"].as<double>();
-        m_config.pub_hz = config["pub_hz"].as<double>();
 
         m_localizer_config.rough_scan_resolution = config["rough_scan_resolution"].as<double>();
         m_localizer_config.rough_map_resolution = config["rough_map_resolution"].as<double>();
@@ -112,21 +103,8 @@ public:
         m_localizer_config.refine_max_iteration = config["refine_max_iteration"].as<int>();
         m_localizer_config.refine_score_thresh = config["refine_score_thresh"].as<double>();
     }
-
-    void tfPubTimerCB()
-    {
-        if (!m_state.message_received)
-            return;
-        // std::lock_guard<std::mutex> lock(m_state.message_mutex);
-        builtin_interfaces::msg::Time now = this->get_clock()->now();
-        sendBroadCastTF(now);
-
-    }
     void timerCB()
     {
-        last_offset_r = Eigen::Quaterniond(m_state.last_offset_r);
-        last_offset_t = V3D(m_state.last_offset_t);
-        // RCLCPP_INFO(this->get_logger(), "Timer Callback Called");
         if (!m_state.message_received)
             return;
 
@@ -136,7 +114,7 @@ public:
 
         if (!update_tf)
         {
-            // sendBroadCastTF(m_state.last_messages_time);
+            sendBroadCastTF(m_state.last_message_time);
             return;
         }
 
@@ -166,11 +144,8 @@ public:
             current_time = m_state.last_message_time;
             m_localizer->setInput(m_state.last_cloud);
         }
-        auto t0 = rclcpp::Clock().now();
-        bool result = m_localizer->align(initial_guess);
-        auto diff1 = rclcpp::Clock().now() - t0;
-        RCLCPP_INFO(this->get_logger(), "ICP Align Time: %f seconds", diff1.seconds());
 
+        bool result = m_localizer->align(initial_guess);
         if (result)
         {
             M3D map_body_r = initial_guess.block<3, 3>(0, 0).cast<double>();
@@ -183,13 +158,8 @@ public:
                 m_state.localize_success = true;
                 m_state.service_received = false;
             }
-        // RCLCPP_INFO(this->get_logger(), "Localize Success.");
         }
-        // else {
-            // RCLCPP_INFO(this->get_logger(), "Localize Failed."); 
-        // }
-        // sendBroadCastTF(current_time);
-        current_time = this->get_clock()->now();
+        sendBroadCastTF(current_time);
         publishMapCloud(current_time);
     }
     void syncCB(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud_msg, const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg)
@@ -212,20 +182,17 @@ public:
         {
             m_state.message_received = true;
             m_config.local_frame = odom_msg->header.frame_id;
-            return;
         }
-        this->timerCB();
     }
 
     void sendBroadCastTF(builtin_interfaces::msg::Time &time)
     {
-        // RCLCPP_INFO(this->get_logger(), ("Send Broadcast TF, time: " + std::to_string(time.sec) + "." + std::to_string(time.nanosec)).c_str());
         geometry_msgs::msg::TransformStamped transformStamped;
         transformStamped.header.frame_id = m_config.map_frame;
         transformStamped.child_frame_id = m_config.local_frame;
         transformStamped.header.stamp = time;
-        Eigen::Quaterniond q(last_offset_r);
-        V3D t = last_offset_t;
+        Eigen::Quaterniond q(m_state.last_offset_r);
+        V3D t = m_state.last_offset_t;
         transformStamped.transform.translation.x = t.x();
         transformStamped.transform.translation.y = t.y();
         transformStamped.transform.translation.z = t.z();
@@ -303,16 +270,12 @@ public:
 private:
     NodeConfig m_config;
     NodeState m_state;
-    Eigen::Quaterniond last_offset_r;
-    V3D last_offset_t;
 
     ICPConfig m_localizer_config;
     std::shared_ptr<ICPLocalizer> m_localizer;
     message_filters::Subscriber<sensor_msgs::msg::PointCloud2> m_cloud_sub;
     message_filters::Subscriber<nav_msgs::msg::Odometry> m_odom_sub;
     rclcpp::TimerBase::SharedPtr m_timer;
-    rclcpp::CallbackGroup::SharedPtr cb_group;
-    rclcpp::TimerBase::SharedPtr tf_pub_timer;
     std::shared_ptr<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::PointCloud2, nav_msgs::msg::Odometry>>> m_sync;
     std::shared_ptr<tf2_ros::TransformBroadcaster> m_tf_broadcaster;
     rclcpp::Service<interface::srv::Relocalize>::SharedPtr m_reloc_srv;
@@ -322,12 +285,7 @@ private:
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<LocalizerNode>();
-    
-    // Creates executor with 4 threads (or pass 0 for hardware concurrency)
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 4);
-    executor.add_node(node);
-    executor.spin();
+    rclcpp::spin(std::make_shared<LocalizerNode>());
     rclcpp::shutdown();
     return 0;
 }
