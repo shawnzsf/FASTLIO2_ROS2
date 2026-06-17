@@ -169,7 +169,7 @@ public:
         auto t0 = rclcpp::Clock().now();
         bool result = m_localizer->align(initial_guess);
         auto diff1 = rclcpp::Clock().now() - t0;
-        RCLCPP_INFO(this->get_logger(), "ICP Align Time: %f seconds", diff1.seconds());
+        // RCLCPP_INFO(this->get_logger(), "ICP Align Time: %f seconds", diff1.seconds());
 
         if (result)
         {
