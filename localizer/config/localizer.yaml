@@ -1,4 +1,4 @@
-cloud_topic: /cloud_registered
+cloud_topic: /cloud_registered_corrected
 odom_topic: /static_odom
 map_frame: map
 local_frame: robot_init
